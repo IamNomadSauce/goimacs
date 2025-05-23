@@ -11,11 +11,27 @@ import (
 )
 
 type model struct {
-	currentDir    string
-	files         []os.DirEntry
-	selectedIndex int
-	focused       string
+	currentDir      string
+	files           []os.DirEntry
+	selectedIndex   int
+	focused         string
+	panes           []pane // Single pane for the editor
+	activePaneIndex int
+	prefixKey       string
+	termWidth       int
+	termHeight      int
+	explorerWidth   int
+}
 
+type pane struct {
+	editor  editor
+	x, y    int
+	width   int
+	height  int
+	focused bool
+}
+
+type editor struct {
 	filePath      string
 	lines         []string
 	cursorX       int
@@ -23,10 +39,6 @@ type model struct {
 	viewStart     int
 	mode          string
 	commandBuffer string
-
-	termWidth     int
-	termHeight    int
-	explorerWidth int
 }
 
 func initialModel() model {
@@ -37,10 +49,10 @@ func initialModel() model {
 		files:         files,
 		selectedIndex: 0,
 		focused:       "explorer",
-		mode:          "normal",
 		termWidth:     80,
 		termHeight:    24,
 		explorerWidth: 20,
+		pane:          pane{}, // Initialize with default empty pane
 	}
 }
 
@@ -54,6 +66,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.termWidth = msg.Width
 		m.termHeight = msg.Height
 		m.explorerWidth = m.termWidth / 5
+		m.pane.width = m.termWidth - m.explorerWidth - 1
+		m.pane.height = m.termHeight - 1
+		m.pane.x = 0
+		m.pane.y = 0
 		return m, nil
 	case tea.KeyMsg:
 		var cmd tea.Cmd
@@ -88,11 +104,15 @@ func updateExplorer(m model, msg tea.KeyMsg) (model, tea.Cmd) {
 		} else {
 			filePath := filepath.Join(m.currentDir, selectedFile.Name())
 			content, _ := os.ReadFile(filePath)
-			m.lines = strings.Split(string(content), "\n")
-			m.filePath = filePath
-			m.cursorX = 0
-			m.cursorY = 0
-			m.viewStart = 0
+			m.pane.editor = editor{
+				filePath:  filePath,
+				lines:     strings.Split(string(content), "\n"),
+				cursorX:   0,
+				cursorY:   0,
+				viewStart: 0,
+				mode:      "normal",
+			}
+			m.pane.focused = true
 			m.focused = "editor"
 		}
 	}
@@ -100,64 +120,65 @@ func updateExplorer(m model, msg tea.KeyMsg) (model, tea.Cmd) {
 }
 
 func updateEditor(m model, msg tea.KeyMsg) (model, tea.Cmd) {
-	switch m.mode {
+	e := &m.pane.editor
+	switch e.mode {
 	case "normal":
 		switch msg.String() {
 		case "h":
-			if m.cursorX > 0 {
-				m.cursorX--
+			if e.cursorX > 0 {
+				e.cursorX--
 			}
 		case "j":
-			if m.cursorY < len(m.lines)-1 {
-				m.cursorY++
-				if m.cursorY >= m.viewStart+m.termHeight-2 {
-					m.viewStart++
+			if e.cursorY < len(e.lines)-1 {
+				e.cursorY++
+				if e.cursorY >= e.viewStart+m.pane.height-2 {
+					e.viewStart++
 				}
 			}
 		case "k":
-			if m.cursorY > 0 {
-				m.cursorY--
-				if m.cursorY < m.viewStart {
-					m.viewStart--
+			if e.cursorY > 0 {
+				e.cursorY--
+				if e.cursorY < e.viewStart {
+					e.viewStart--
 				}
 			}
 		case "l":
-			if m.cursorX < len(m.lines[m.cursorY]) {
-				m.cursorX++
+			if e.cursorX < len(e.lines[e.cursorY]) {
+				e.cursorX++
 			}
 		case "i":
-			m.mode = "insert"
+			e.mode = "insert"
 		case ":":
-			m.mode = "command"
-			m.commandBuffer = ":"
+			e.mode = "command"
+			e.commandBuffer = ":"
 		}
 	case "insert":
 		switch msg.String() {
 		case "esc":
-			m.mode = "normal"
+			e.mode = "normal"
 		default:
 			if len(msg.String()) == 1 {
 				char := msg.String()
-				line := m.lines[m.cursorY]
-				m.lines[m.cursorY] = line[:m.cursorX] + char + line[m.cursorX:]
-				m.cursorX++
+				line := e.lines[e.cursorY]
+				e.lines[e.cursorY] = line[:e.cursorX] + char + line[e.cursorX:]
+				e.cursorX++
 			}
 		}
 	case "command":
 		switch msg.String() {
 		case "enter":
-			if m.commandBuffer == ":w" {
-				os.WriteFile(m.filePath, []byte(strings.Join(m.lines, "\n")), 0644)
-			} else if m.commandBuffer == ":q" {
+			if e.commandBuffer == ":w" {
+				os.WriteFile(e.filePath, []byte(strings.Join(e.lines, "\n")), 0644)
+			} else if e.commandBuffer == ":q" {
 				return m, tea.Quit
 			}
-			m.mode = "normal"
-			m.commandBuffer = ""
+			e.mode = "normal"
+			e.commandBuffer = ""
 		case "esc":
-			m.mode = "normal"
-			m.commandBuffer = ""
+			e.mode = "normal"
+			e.commandBuffer = ""
 		default:
-			m.commandBuffer += msg.String()
+			e.commandBuffer += msg.String()
 		}
 	}
 	return m, nil
@@ -165,11 +186,11 @@ func updateEditor(m model, msg tea.KeyMsg) (model, tea.Cmd) {
 
 func (m model) View() string {
 	explorerView := renderExplorer(m)
-	editorView := renderEditor(m)
+	editorView := renderEditor(m.pane.editor, m.pane.height)
 	statusBar := renderStatusBar(m)
 
 	explorerStyle := lipgloss.NewStyle().Width(m.explorerWidth).Height(m.termHeight - 1)
-	editorStyle := lipgloss.NewStyle().Width(m.termWidth - m.explorerWidth - 1).Background(lipgloss.Color("gray"))
+	editorStyle := lipgloss.NewStyle().Width(m.termWidth - m.explorerWidth - 1).Height(m.termHeight - 1)
 	separatorStyle := lipgloss.NewStyle().Width(1).Height(m.termHeight - 1).Background(lipgloss.Color("gray"))
 
 	left := explorerStyle.Render(explorerView)
@@ -197,16 +218,19 @@ func renderExplorer(m model) string {
 	return s.String()
 }
 
-func renderEditor(m model) string {
+func renderEditor(e editor, height int) string {
+	if len(e.lines) == 0 {
+		return "No file open"
+	}
 	var s strings.Builder
-	viewHeight := m.termHeight - 2
-	for i := m.viewStart; i < m.viewStart+viewHeight && i < len(m.lines); i++ {
-		line := m.lines[i]
-		if i == m.cursorY && m.focused == "editor" {
-			if m.cursorX < len(line) {
-				s.WriteString(line[:m.cursorX])
-				s.WriteString(lipgloss.NewStyle().Reverse(true).Render(string(line[m.cursorX])))
-				s.WriteString(line[m.cursorX+1:])
+	viewHeight := height - 2 // Adjust for status bar and borders
+	for i := e.viewStart; i < e.viewStart+viewHeight && i < len(e.lines); i++ {
+		line := e.lines[i]
+		if i == e.cursorY {
+			if e.cursorX < len(line) {
+				s.WriteString(line[:e.cursorX])
+				s.WriteString(lipgloss.NewStyle().Reverse(true).Render(string(line[e.cursorX])))
+				s.WriteString(line[e.cursorX+1:])
 			} else {
 				s.WriteString(line)
 				s.WriteString(lipgloss.NewStyle().Reverse(true).Render(" "))
@@ -220,9 +244,13 @@ func renderEditor(m model) string {
 }
 
 func renderStatusBar(m model) string {
-	status := fmt.Sprintf("Mode: %s | File: %s", m.mode, m.filePath)
-	if m.mode == "command" {
-		status = m.commandBuffer
+	e := m.pane.editor
+	status := fmt.Sprintf("Mode: %s | File: %s", e.mode, e.filePath)
+	if e.mode == "command" {
+		status = e.commandBuffer
+	}
+	if e.filePath == "" {
+		status = "Mode: normal | No file open"
 	}
 	return lipgloss.NewStyle().Width(m.termWidth).Background(lipgloss.Color("green")).Render(status)
 }
